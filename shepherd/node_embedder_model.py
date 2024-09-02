@@ -29,8 +29,15 @@ class NodeEmbeder(pl.LightningModule):
     def __init__(self, all_data, edge_attr_dict, hp_dict=None, num_nodes=None, combined_training=False, spl_mat=[]):
         super().__init__()
 
+
+        # THIS IS ADDED: premtc 
+        self.training_step_outputs = []        
+        self.test_step_outputs = []
+        self.validation_step_outputs = []
+
         # save hyperparameters
         self.save_hyperparameters("hp_dict", ignore=["spl_mat"])
+        
 
         # Data
         self.all_data = all_data
@@ -268,16 +275,17 @@ class NodeEmbeder(pl.LightningModule):
         rel_logs = metrics_per_rel(pred, link_labels, self.edge_attr_dict, data.all_edge_types, "train", self.pred_threshold)
         logs.update(rel_logs)
         self._logger(logs)
+        self.training_step_outputs.append({'loss': loss, 'logs': logs}) # --> THIS IS ADDED: premtc
         return {'loss': loss, 'logs': logs}
 
-    def training_epoch_end(self, outputs):     
+    def on_train_epoch_end(self): # --> THIS IS CHANGED: premtc --> Output is deleted and name is changed from "training_epoch_end" to "on_train_epoch_end" 
         roc_train = []
         ap_train = []
         acc_train = []
         f1_train = []
         total_train_loss = []
 
-        for batch_log in outputs:
+        for batch_log in self.training_step_outputs:
             roc_train.append(batch_log['logs']["train/node_roc"])
             ap_train.append(batch_log['logs']["train/node_ap"])
             acc_train.append(batch_log['logs']["train/node_acc"])
@@ -290,6 +298,7 @@ class NodeEmbeder(pl.LightningModule):
                       "train/node_total_acc": np.mean(acc_train), 
                       "train/node_total_f1": np.mean(f1_train)})
         self._logger({'node_curr_epoch': self.current_epoch})
+        self.training_step_outputs = [] # --> THIS IS ADDED: premtc
 
     def validation_step(self, data, data_idx):
         data, loss, pred, link_labels, roc_score, ap_score, acc, f1 = self._step(data, 'val')
@@ -304,16 +313,17 @@ class NodeEmbeder(pl.LightningModule):
         rel_logs = metrics_per_rel(pred, link_labels, self.edge_attr_dict, data.all_edge_types, "val", self.pred_threshold)
         logs.update(rel_logs)
         self._logger(logs)
+        self.validation_step_outputs.append(logs)
         return logs
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self): # --> THIS IS CHANGED: premtc --> Output is deleted and name is changed from "validation_epoch_end" to "validation_epoch_end"
         roc_val = []
         ap_val = []
         acc_val = []
         f1_val = []
         total_val_loss = []
 
-        for batch_log in outputs:
+        for batch_log in self.validation_step_outputs:
             roc_val.append(batch_log["val/node_roc"])
             ap_val.append(batch_log["val/node_ap"])
             acc_val.append(batch_log["val/node_acc"])
@@ -326,6 +336,7 @@ class NodeEmbeder(pl.LightningModule):
                       "val/node_total_acc": np.mean(acc_val), 
                       "val/node_total_f1": np.mean(f1_val)})
         self._logger({'node_curr_epoch': self.current_epoch})
+        self.validation_step_outputs = [] # --> THIS IS ADDED: premtc
 
     def test_step(self, data, data_idx):
         data, loss, pred, link_labels, roc_score, ap_score, acc, f1 = self._step(data, 'test')
@@ -340,15 +351,17 @@ class NodeEmbeder(pl.LightningModule):
         rel_logs = metrics_per_rel(pred, link_labels, self.edge_attr_dict, data.all_edge_types, "test", self.pred_threshold)
         logs.update(rel_logs)
         self._logger(logs)
+        self.test_step_outputs.append(logs)
+
         return logs
 
-    def test_epoch_end(self, outputs):
+    def on_test_epoch(self):
         roc = []
         ap = []
         acc = []
         f1 = []
 
-        for batch_log in outputs:
+        for batch_log in self.test_step_outputs:
             roc.append(batch_log["test/node_roc"])
             ap.append(batch_log["test/node_ap"])
             acc.append(batch_log["test/node_acc"])
@@ -359,6 +372,7 @@ class NodeEmbeder(pl.LightningModule):
                       "test/node_total_acc": np.mean(acc), 
                       "test/node_total_f1": np.mean(f1)})
         self._logger({'node_curr_epoch': self.current_epoch})
+        self.test_step_outputs.clear()
 
     
     def predict(self, data):

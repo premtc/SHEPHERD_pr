@@ -6,12 +6,14 @@ import wandb
 from torch import nn
 import torch
 import torch.nn.functional as F
+from torch.nn.parameter import Parameter
 from torch.nn import TransformerEncoderLayer
 
 import numpy as np
 from scipy.stats import rankdata
 
-from allennlp.modules.attention import CosineAttention, BilinearAttention, AdditiveAttention, DotProductAttention
+# from allennlp.modules.attention import CosineAttention, BilinearAttention, AdditiveAttention, DotProductAttention
+from .custom_attention import CosineAttention, BilinearAttention, AdditiveAttention, DotProductAttention
 
 
 from utils.loss_utils import MultisimilarityCriterion, _construct_labels, unique, _construct_disease_labels
@@ -74,7 +76,7 @@ class GPAligner(pl.LightningModule):
 
         # attention weighted average of phenotype embeddings
         batched_attn = self.attn_vector.repeat(phenotype_embeddings.shape[0],1)
-        attn_weights = self.attention(batched_attn, phenotype_embeddings, phenotype_mask)
+        attn_weights = self.attention(batched_attn, phenotype_embeddings)
         phenotype_embedding = weighted_sum(phenotype_embeddings, attn_weights)
 
         # project embeddings

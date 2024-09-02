@@ -145,8 +145,9 @@ def get_dataloaders(hparams, all_data, nid_to_spl_dict, n_nodes, gene_phen_dis_n
         print("Using augment gene similarity: %s" % args.aug_sim)
     else: gene_similarity_dict=None
 
-    with open("/home/ema30/zaklab/rare_disease_dx/formatted_patients/degree_dict_8.9.21_kg.pkl", "rb") as input_file:
-        gene_deg_dict = pickle.load(input_file)
+    # THIS IS CHANGED - premtc: NOT USED
+    # with open("/home/ema30/zaklab/rare_disease_dx/formatted_patients/degree_dict_8.9.21_kg.pkl", "rb") as input_file:
+    #     gene_deg_dict = pickle.load(input_file)
 
     if inference:
         train_dataloader = None
@@ -161,7 +162,8 @@ def get_dataloaders(hparams, all_data, nid_to_spl_dict, n_nodes, gene_phen_dis_n
                         upsample_cand=hparams['upsample_cand'], n_cand_diseases=hparams['n_cand_diseases'], use_diseases=hparams['use_diseases'], nid_to_spl_dict=nid_to_spl_dict, gp_spl=spl, spl_indexing_dict=spl_indexing_dict,
                         hparams=hparams, pin_memory=hparams['pin_memory'],
                         gene_similarity_dict = gene_similarity_dict,
-                        gene_deg_dict = gene_deg_dict)
+                        # gene_deg_dict = gene_deg_dict # # THIS IS CHANGED - premtc: NOT USED
+                        )
         print('finished setting up train dataloader')
         print('setting up val dataloader')
         val_dataloader = PatientNeighborSampler('val', all_data.edge_index, all_data.edge_index[:,all_data.val_mask], 
@@ -173,7 +175,8 @@ def get_dataloaders(hparams, all_data, nid_to_spl_dict, n_nodes, gene_phen_dis_n
                         n_cand_diseases=hparams['n_cand_diseases'], use_diseases=hparams['use_diseases'], nid_to_spl_dict=nid_to_spl_dict, gp_spl=spl, spl_indexing_dict=spl_indexing_dict,
                         hparams=hparams,  pin_memory=hparams['pin_memory'],
                         gene_similarity_dict = gene_similarity_dict, 
-                        gene_deg_dict = gene_deg_dict)
+                        # gene_deg_dict = gene_deg_dict # THIS IS CHANGED - premtc: NOT USED
+                        )
         print('finished setting up val dataloader')
     
     print('setting up test dataloader')
@@ -187,7 +190,8 @@ def get_dataloaders(hparams, all_data, nid_to_spl_dict, n_nodes, gene_phen_dis_n
                         n_cand_diseases=hparams['test_n_cand_diseases'],  use_diseases=hparams['use_diseases'], nid_to_spl_dict=nid_to_spl_dict, gp_spl=spl, spl_indexing_dict=spl_indexing_dict,
                         hparams=hparams, pin_memory=hparams['pin_memory'],
                         gene_similarity_dict = gene_similarity_dict, 
-                        gene_deg_dict = gene_deg_dict) 
+                        # gene_deg_dict = gene_deg_dict
+                        ) 
     else: test_dataloader = None
     print('finished setting up test dataloader')
     
@@ -239,7 +243,7 @@ def train(args, hparams):
         if ":" in args.resume: # colons are not allowed in ID/resume name
             resume_id = "_".join(args.resume.split(":"))
         run_name = args.resume
-        wandb_logger = WandbLogger(run_name, project=hparams['wandb_project_name'], entity='rare_disease_dx', save_dir=hparams['wandb_save_dir'], id=resume_id, resume=resume_id)
+        wandb_logger = WandbLogger(run_name, project=hparams['wandb_project_name'],  save_dir=hparams['wandb_save_dir'], id=resume_id, resume=resume_id)
         
         #add run name to hparams dict
         hparams['run_name'] = run_name
@@ -256,7 +260,7 @@ def train(args, hparams):
         run_name = "{}_val_{}".format(curr_time, val_data).replace('patients', 'pats') 
         run_name = run_name + f'_seed={args.seed}'
         run_name = run_name.replace('5_candidates_mapped_only', '5cand_map').replace('8.9.21_kgsolved_manual_baylor_nobgm_distractor_genes', 'manual').replace('patient_disease_NCA', 'pd_NCA').replace('_distractor', '')
-        wandb_logger = WandbLogger(name=run_name, project=hparams['wandb_project_name'], entity='rare_disease_dx', save_dir=hparams['wandb_save_dir'],
+        wandb_logger = WandbLogger(name=run_name, project=hparams['wandb_project_name'],  save_dir=hparams['wandb_save_dir'],
                         id="_".join(run_name.split(":")), resume="allow") 
         
         #add run name to hparams dict
@@ -305,15 +309,16 @@ def train(args, hparams):
         limit_val_batches=1.0
 
     print('initialize trainer')
-    patient_trainer = pl.Trainer(gpus=hparams['n_gpus'], 
+    patient_trainer = pl.Trainer(
+                                # gpus=hparams['n_gpus'], # THIS IS CHANGED - premtc: It is not in __init__ of 
                                 logger=wandb_logger, 
                                 max_epochs=hparams['max_epochs'], 
                                 callbacks=[patient_checkpoint_callback],
                                 profiler=hparams['profiler'],
-                                log_gpu_memory=hparams['log_gpu_memory'],
+                                # log_gpu_memory=hparams['log_gpu_memory'], # THIS IS CHANGED - premtc: It is not in __init__ of
                                 limit_train_batches=limit_train_batches, 
                                 limit_val_batches=limit_val_batches,
-                                weights_summary="full",
+                                # weights_summary="full", , # THIS IS CHANGED - premtc: It is not in __init__ of
                                 gradient_clip_val=hparams['gradclip'])
 
     #  Train
@@ -340,7 +345,7 @@ def inference(args, hparams):
     lr = hparams['lr']   
     test_data = hparams['test_data'].split('.txt')[0].replace('/', '.')
     run_name = "{}_lr_{}_test_{}".format(curr_time, lr, test_data)
-    wandb_logger = WandbLogger(run_name, project=hparams['wandb_project_name'], entity='rare_disease_dx', save_dir=hparams['wandb_save_dir'])
+    wandb_logger = WandbLogger(run_name, project=hparams['wandb_project_name'], save_dir=hparams['wandb_save_dir'])
     print('Run name: ', run_name)
     hparams['run_name'] = run_name
 
@@ -356,7 +361,15 @@ def inference(args, hparams):
     # Get patient model 
     model = get_model(args, hparams, node_hparams, all_data, edge_attr_dict, n_nodes, load_from_checkpoint=True)
 
-    trainer = pl.Trainer(gpus=0, logger=wandb_logger)
+    # trainer = pl.Trainer(gpus=0, logger=wandb_logger)
+    # Initialize the trainer with optimized memory usage
+    trainer = pl.Trainer(
+        precision=16,  # Use mixed precision
+        limit_test_batches=1.0,  # Ensure the full test batch is evaluated
+        accelerator='cpu',
+        logger=wandb_logger,
+        accumulate_grad_batches=1,  # Minimal accumulation for inference
+    )
     results = trainer.test(model, dataloaders=test_dataloader)
     print(results)
     print('---- RESULTS ----')

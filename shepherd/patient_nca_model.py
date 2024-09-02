@@ -33,6 +33,11 @@ class CombinedPatientNCA(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters('hparams') 
 
+         # THIS IS ADDED/CHANGED - premtc: for the new hook on_train_epoch_end
+        self.training_step_outputs = []
+        self.validation_step_outputs = []
+        self.test_step_outputs = []
+
         self.all_data = all_data
 
         self.all_train_nodes = []
@@ -171,7 +176,7 @@ class CombinedPatientNCA(pl.LightningModule):
                 'train/batch_cand_disease_nid': cand_disease_idx.detach().cpu(),
                 'train/patient.disease_embed': cand_disease_embeddings.detach().cpu()
             })
-
+        self.training_step_outputs.append(batch_results)
         return batch_results
 
     def validation_step(self, batch, batch_idx):
@@ -203,12 +208,14 @@ class CombinedPatientNCA(pl.LightningModule):
                                   'val/batch_cand_disease_nid': cand_disease_idx.detach().cpu(),
                                   'val/patient.disease_embed': cand_disease_embeddings.detach().cpu()
                                 })
+        self.validation_step_outputs.append(batch_results)
         return batch_results 
 
     def write_results_to_file(self, batch, softmax, correct_ranks, labels, phenotype_mask, disease_mask, attn_weights,  gat_attn, node_embeddings, phenotype_embeddings, disease_embeddings, save=True, loop_type='predict'):
         
         if save:
-            run_folder = Path(project_config.PROJECT_DIR) / 'checkpoints' / 'patient_NCA' / self.hparams.hparams['run_name'] / (Path(self.test_dataloader.dataloader.dataset.filepath).stem ) #.replce('/', '_')
+            # run_folder = Path(project_config.PROJECT_DIR) / 'checkpoints' / 'patient_NCA' / self.hparams.hparams['run_name'] / (Path(self.test_dataloader.dataloader.dataset.filepath).stem ) #.replce('/', '_')
+            run_folder = Path(project_config.PROJECT_DIR) / 'checkpoints' / 'patient_NCA' / 'TEST_KOT2'
             run_folder.mkdir(parents=True, exist_ok=True)
             print('run_folder', run_folder)
         
@@ -315,7 +322,7 @@ class CombinedPatientNCA(pl.LightningModule):
                 'test/cand_disease_names': None
 
             })
-        
+        self.test_step_outputs.append(batch_results)
         return batch_results
 
     
@@ -362,7 +369,17 @@ class CombinedPatientNCA(pl.LightningModule):
 
     
     def _epoch_end(self, outputs, loop_type):
-        correct_ranks = torch.cat([ranks  for x in outputs for ranks in x[f'{loop_type}/correct_ranks']], dim=0) #if len(ranks.shape) > 0 else ranks.unsqueeze(-1)
+        
+        # THIS IS ADDED/CHANGED - premtc: THIS WAS AN ERROR, DONT UNDERSTAND IT
+        # correct_gene_ranks = torch.cat([x[f'{loop_type}/{loop_type}_correct_gene_ranks'] for x in outputs], dim=0)
+        if outputs:
+            print(" ======= ======== ===== ===== LOOP TYPE PASSED ===== ===== ===== ==== ===========")
+            correct_ranks = torch.cat([ranks  for x in outputs for ranks in x[f'{loop_type}/correct_ranks']], dim=0) #if len(ranks.shape) > 0 else ranks.unsqueeze(-1)
+        else:
+            correct_ranks = torch.tensor([])
+            print(" ======= ======== ===== ===== LOOP TYPE DID NOT PASS ===== ===== ===== ==== ===========")
+        
+
         correct_ranks_with_pad = [ranks if len(ranks.unsqueeze(-1)) > 0 else torch.tensor([-1]) for x in outputs for ranks in x[f'{loop_type}/correct_ranks']]
 
         if loop_type == "test":
@@ -466,14 +483,20 @@ class CombinedPatientNCA(pl.LightningModule):
         self.log(f'{loop_type}/top10_acc', top_10_acc, prog_bar=False)
         self.log(f'{loop_type}/mrr', mrr, prog_bar=False)
 
-    def training_epoch_end(self, outputs):
-        self._epoch_end(outputs, 'train')
+    def on_train_epoch_end(self): # THIS IS CHANGED: premtc -> the hook is changed to on_train_epoch_end and outputs is removed
+        self._epoch_end(self.training_step_outputs, 'train')
+        self.training_step_outputs.clear()
+        
 
-    def validation_epoch_end(self, outputs):
-        self._epoch_end(outputs, 'val')
+    def on_validation_epoch_end(self): # THIS IS CHANGED: premtc -> the hook is changed to on_validation_epoch_end and outputs is removed
+        self._epoch_end(self.validation_step_outputs, 'val')
+        self.validation_step_outputs.clear()
 
-    def test_epoch_end(self, outputs):
-        self._epoch_end(outputs, 'test')
+    # def test_epoch_end(self, outputs):
+    #     self._epoch_end(outputs, 'test')
+    def on_test_epoch_end(self):
+        self._epoch_end(self.test_step_outputs, 'test')
+        self.test_step_outputs.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.hparams['lr'])

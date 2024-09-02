@@ -48,7 +48,7 @@ python predict.py \
 --patient_data test_predict \
 --edgelist KG_edgelist_mask.txt \
 --node_map KG_node_map.txt \
---saved_node_embeddings_path checkpoints/pretrain.ckpt \
+--saved_node_embeddings_path checkpoints/test_pretrain.ckpt \
 --best_ckpt checkpoints/causal_gene_discovery.ckpt 
 
 python predict.py \
@@ -129,7 +129,10 @@ def predict(args):
     # Get patient model 
     model = get_model(args, hparams, None, all_data, edge_attr_dict,  n_nodes,load_from_checkpoint=True)
 
-    trainer = pl.Trainer(gpus=hparams['n_gpus'])
+    # trainer = pl.Trainer(gpus=hparams['n_gpus'])
+    # trainer = pl.Trainer(accelerator='cpu')
+    # trainer = pl.Trainer(accelerator='gpu', devices= hparams['n_gpus'])
+    trainer = pl.Trainer(accelerator='cpu')
     
     t1 = time.time()
     results = trainer.predict(model, dataloaders=dataloader)

@@ -20,6 +20,17 @@ from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_sco
 # Global variables
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+# THIS IS ADDED/CHANGED - premtc:
+class EdgeIndex(NamedTuple):
+    edge_index: Tensor
+    e_id: Optional[Tensor]
+    size: Tuple[int, int]
+
+    def to(self, *args, **kwargs):
+        edge_index = self.edge_index.to(*args, **kwargs)
+        e_id = self.e_id.to(*args, **kwargs) if self.e_id is not None else None
+        return EdgeIndex(edge_index, e_id, self.size)
+
 
 def to_numpy(input):
         if isinstance(input, torch.sparse.FloatTensor):
@@ -51,16 +62,39 @@ class HeterogeneousEdgeIndex(NamedTuple): #adopted from NeighborSampler code in 
 
         return EdgeIndex(edge_index, e_id, edge_type, self.size)
 
+# !!!!!! THIS IS CHANGED !!!!!!
+# THIS IS ADDED/CHANGED - premtc: One line is commented out, and the other is added. CAREFUL! The other is GPT Generated.
+# !!!!!! THIS IS CHANGED !!!!!!
+
+# def get_batched_data(data, all_data):
+#     batch_size, n_id, adjs = data
+#     adjs = [HeterogeneousEdgeIndex(adj.edge_index, adj.e_id, all_data.edge_attr[adj.e_id], adj.size) for adj in adjs] 
+#     data = Data(adjs = adjs, 
+#                 batch_size = batch_size,
+#                 n_id = n_id, 
+#                 )
+#     return data
 
 def get_batched_data(data, all_data):
     batch_size, n_id, adjs = data
-    adjs = [HeterogeneousEdgeIndex(adj.edge_index, adj.e_id, all_data.edge_attr[adj.e_id], adj.size) for adj in adjs] 
-    data = Data(adjs = adjs, 
-                batch_size = batch_size,
-                n_id = n_id, 
-                )
+    device = n_id.device  # Ensure all tensors are on the same device as n_id
+    
+    # Move edge_attr to the correct device
+    all_data.edge_attr = all_data.edge_attr.to(device)
+    
+    # Move all tensors to the correct device before creating HeterogeneousEdgeIndex instances
+    adjs = [HeterogeneousEdgeIndex(
+                adj.edge_index.to(device), 
+                adj.e_id.to(device) if adj.e_id is not None else None, 
+                all_data.edge_attr[adj.e_id].to(device) if adj.e_id is not None else None, 
+                adj.size) for adj in adjs] 
+    
+    data = Data(adjs=adjs, 
+                batch_size=batch_size,
+                n_id=n_id)
+    
     return data
-
+# !!!!!! THIS IS CHANGED !!!!!!
 
 MAX_SIZE = 625
 def get_mask(edge_index, nodes, ind):

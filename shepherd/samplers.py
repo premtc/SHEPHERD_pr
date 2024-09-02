@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_sparse import SparseTensor
 from torch_cluster import random_walk
-from torch_geometric.data.sampler import EdgeIndex, Adj
+# from torch_geometric.data.sampler import EdgeIndex, Adj
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 from torch_geometric.utils import add_self_loops, add_remaining_self_loops
@@ -23,6 +23,28 @@ from utils.pretrain_utils import get_indices_into_edge_index, HeterogeneousEdgeI
 from sklearn.preprocessing import label_binarize
 
 import project_config
+
+# THIS IS ADDED/CHANGED - premtc:
+class EdgeIndex(NamedTuple):
+    edge_index: Tensor
+    e_id: Optional[Tensor]
+    size: Tuple[int, int]
+
+    def to(self, *args, **kwargs):
+        edge_index = self.edge_index.to(*args, **kwargs)
+        e_id = self.e_id.to(*args, **kwargs) if self.e_id is not None else None
+        return EdgeIndex(edge_index, e_id, self.size)
+
+# THIS IS ADDED/CHANGED - premtc:
+class Adj(NamedTuple):
+    adj_t: SparseTensor
+    e_id: Optional[Tensor]
+    size: Tuple[int, int]
+
+    def to(self, *args, **kwargs):
+        adj_t = self.adj_t.to(*args, **kwargs)
+        e_id = self.e_id.to(*args, **kwargs) if self.e_id is not None else None
+        return Adj(adj_t, e_id, self.size)
 
 
 class NeighborSampler(torch.utils.data.DataLoader):
@@ -275,7 +297,7 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
         self.do_filter_edges = do_filter_edges
         self.relevant_node_idx = relevant_node_idx
         self.n_nodes = n_nodes
-        self.all_edge_attr = all_edge_attributes
+        self.all_edge_attributes = all_edge_attributes
         self.dataset_type = dataset_type
         self.sparse_sample = sparse_sample
         self.edge_index = edge_index #always train edge index
@@ -297,6 +319,9 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
         else: self.gp_spl = None
         self.spl_indexing_dict = spl_indexing_dict
 
+        # Remove dataset from kwargs if present
+        kwargs.pop('dataset', None)
+
         # Up-sample candidate genes
         self.upsample_cand = upsample_cand
         self.cand_gene_freq = Counter([])
@@ -310,6 +335,8 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
         self.hparams = hparams
 
         self.gene_similarity_dict = gene_similarity_dict
+        print(f"=== ====  ====> Gene Similarity Dict: {self.gene_similarity_dict}")
+        print(f"=== ====  ====> Gene Similarity Dict without self: {gene_similarity_dict}")
         self.gene_deg_dict = gene_deg_dict
 
         # Obtain a *transposed* `SparseTensor` instance.
@@ -417,7 +444,7 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
     def add_patient_information(self, patient_ids, phenotype_node_idx, candidate_gene_node_idx, correct_genes_node_idx, sim_gene_node_idx, gene_sims, gene_degs, disease_node_idx, candidate_disease_node_idx, labels, disease_labels, patient_labels, additional_labels, adjs, batch_size, n_id, sparse_idx, target_batch): #candidate_disease_node_idx
 
         # Create Data Object & Add patient level information
-        adjs = [HeterogeneousEdgeIndex(adj.edge_index, adj.e_id, self.all_edge_attr[adj.e_id], adj.size) for adj in adjs] 
+        adjs = [HeterogeneousEdgeIndex(adj.edge_index, adj.e_id, self.all_edge_attributes[adj.e_id], adj.size) for adj in adjs] 
         max_n_candidates = max([len(l) for l in candidate_gene_node_idx])
         data = Data(adjs = adjs, 
                 batch_size = batch_size,
@@ -578,6 +605,9 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
     
     def get_similar_genes(self, patient_ids, candidate_gene_node_idx):
         k = self.hparams['n_sim_genes']
+        print(f"========= //////// ========= ////////Patiend IDs: {len(patient_ids)} ========= //////// ========= //////// ========= ////////")
+        print(f"========= //////// ========= ////////Candidate_gene_node_idx: {len(candidate_gene_node_idx)} ========= //////// ========= //////// ========= ////////")
+        # print(f"========= //////// ========= ////////GENE SIMILARITY DICT: {len(self.gene_similarity_dict)} ========= //////// ========= //////// ========= ////////")
         gene_ids = []
         sims = []
         degs = []
@@ -590,6 +620,7 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
                 p_genes.append(torch.LongTensor([idx for idx, sim in list(self.gene_similarity_dict[int(g)])[:k]]))
                 p_sims.append(torch.LongTensor([sim for idx, sim in list(self.gene_similarity_dict[int(g)])[:k]]))
                 p_degs.append(self.gene_deg_dict[int(g)])
+
             gene_ids.append(torch.stack(p_genes))
             sims.append(torch.stack(p_sims))
             degs.append(torch.LongTensor(p_degs))
@@ -597,6 +628,7 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
         assert len(sims) == len(patient_ids)
         unique_genes = torch.unique(torch.cat(gene_ids).flatten()).unsqueeze(-1)
         return tuple(gene_ids), tuple(sims), tuple(degs), tuple(unique_genes)
+
 
     def collate(self, batch):
         t00 = time.time()
@@ -657,7 +689,9 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
             disease_labels = torch.tensor([1] * len(candidate_disease_node_idx))
 
         if self.hparams['augment_genes']:
+            #premtc CHANGE
             sim_gene_node_idx, gene_sims, gene_degs, unique_sim_genes = self.get_similar_genes(patient_ids, candidate_gene_node_idx)
+            unique_sim_genes = gene_degs = gene_sims = sim_gene_node_idx = None
         else:
             unique_sim_genes = gene_degs = gene_sims = sim_gene_node_idx = None
 
@@ -685,6 +719,3 @@ class PatientNeighborSampler(torch.utils.data.DataLoader):
 
     def __repr__(self):
         return '{}(sizes={})'.format(self.__class__.__name__, self.sizes)
-
-
-

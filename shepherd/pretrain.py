@@ -18,7 +18,9 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
 # Pytorch Geo
-from torch_geometric.data.sampler import NeighborSampler as PyGeoNeighborSampler
+# THIS IS CHANGED - premtc: 
+# -----> not used -> from torch_geometric.data.sampler import NeighborSampler as PyGeoNeighborSampler
+from torch_geometric.loader import NeighborSampler as PyGeoNeighborSampler
 from torch_geometric.data import Data, DataLoader
 
 # W&B
@@ -84,14 +86,14 @@ def train(args, hparams):
         if ":" in args.resume: # colons are not allowed in ID/resume name
             resume_id = "_".join(args.resume.split(":"))
         run_name = args.resume
-        wandb_logger = WandbLogger(run_name, project='kg-train', entity='rare_disease_dx', save_dir=hparams['wandb_save_dir'], id=resume_id, resume=resume_id)
+        wandb_logger = WandbLogger(run_name, project='kg-train',  save_dir=hparams['wandb_save_dir'], id=resume_id, resume=resume_id)
         model = NodeEmbeder.load_from_checkpoint(checkpoint_path=str(Path(args.save_dir) / 'checkpoints' /  args.best_ckpt), 
                                                  all_data=all_data, edge_attr_dict=edge_attr_dict, 
                                                  num_nodes=len(nodes["node_idx"].unique()), combined_training=False) 
     else:
         curr_time = datetime.now().strftime("%H:%M:%S")
         run_name = f"{curr_time}_run"
-        wandb_logger = WandbLogger(run_name, project='kg-train', entity='rare_disease_dx', save_dir=hparams['wandb_save_dir'], id="_".join(run_name.split(":")), resume="allow")
+        wandb_logger = WandbLogger(run_name, project='kg-train',  save_dir=hparams['wandb_save_dir'], id="_".join(run_name.split(":")), resume="allow")
         model = NodeEmbeder(all_data, edge_attr_dict, hp_dict=hparams, num_nodes=len(nodes["node_idx"].unique()), combined_training=False)
 
     checkpoint_callback = ModelCheckpoint(monitor='val/node_total_acc', dirpath=Path(args.save_dir) / 'checkpoints', filename=f'{run_name}' + '_{epoch}', save_top_k=1, mode='max')
@@ -106,7 +108,9 @@ def train(args, hparams):
         limit_train_batches = 1.0
         limit_val_batches = 1.0 
 
-    trainer = pl.Trainer(gpus=hparams['n_gpus'], logger=wandb_logger, 
+    trainer = pl.Trainer(
+                        # gpus=hparams['n_gpus'], # THIS IS CHANGED - premtc: It is not in __init__ of NodeEmbeder
+                         logger=wandb_logger, 
                          max_epochs=hparams['max_epochs'], 
                          callbacks=[checkpoint_callback, lr_monitor], 
                          gradient_clip_val=hparams['gradclip'],
@@ -115,13 +119,14 @@ def train(args, hparams):
                          limit_train_batches=limit_train_batches, 
                          limit_val_batches=limit_val_batches,
                         ) 
+
     train_dataloader, val_dataloader, test_dataloader = get_dataloaders(hparams, all_data)
 
     # Train
     trainer.fit(model, train_dataloader, val_dataloader)
     
     # Test
-    trainer.test(ckpt_path='best', test_dataloaders=test_dataloader)
+    trainer.test(ckpt_path='best', dataloaders=test_dataloader)
 
 @torch.no_grad()
 def save_embeddings(args, hparams):
