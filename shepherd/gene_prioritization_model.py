@@ -32,7 +32,13 @@ class CombinedGPAligner(pl.LightningModule):
 
     def __init__(self, edge_attr_dict, all_data, n_nodes=None, node_ckpt=None, hparams=None, node_hparams=None,  spl_pca=[], spl_gate=[]):
         super().__init__()
+        
         print('Initializing Model')
+
+        # THIS IS ADDED/CHANGED - premtc: for the new hook on_train_epoch_end
+        self.training_step_outputs = []
+        self.validation_step_outputs = []
+        self.test_step_outputs = []
 
         self.save_hyperparameters('hparams', ignore=["spl_pca", "spl_gate"]) # spl_pca and spl_gate never get used
 
@@ -52,7 +58,8 @@ class CombinedGPAligner(pl.LightningModule):
         self.node_model = NodeEmbeder.load_from_checkpoint(checkpoint_path=node_ckpt, 
                                                            all_data=all_data,
                                                            edge_attr_dict=edge_attr_dict, 
-                                                           num_nodes=n_nodes)
+                                                           num_nodes=n_nodes,
+                                                           strict=False)
         
         self.patient_model = self.get_patient_model()
         print('End Patient Model Initialization')
@@ -67,7 +74,7 @@ class CombinedGPAligner(pl.LightningModule):
     def forward(self, batch, step_type):
         # Node Embedder
         t0 = time.time()
-        print(len(batch.adjs))
+        # print(len(batch.adjs))
         outputs, gat_attn = self.node_model.forward(batch.n_id, batch.adjs)
         pad_outputs = torch.cat([torch.zeros(1, outputs.size(1), device=outputs.device), outputs])
         t1 = time.time()
@@ -178,7 +185,7 @@ class CombinedGPAligner(pl.LightningModule):
         return node_embedder_loss, loss, correct_gene_ranks, roc_score, ap_score, acc, f1, node_embeddings, gat_attn, phenotype_embedding, candidate_gene_embeddings, attn_weights, phen_gene_sims, raw_phen_gene_sims, gene_mask, phenotype_mask
 
     def training_step(self, batch, batch_idx):
-        print('training step')
+        # print('training step')
         node_embedder_loss, patient_loss, correct_gene_ranks, roc_score, ap_score, acc, f1, node_embeddings, gat_attn, phenotype_embedding, candidate_gene_embeddings, attn_weights, phen_gene_sims, raw_phen_gene_sims, gene_mask, phenotype_mask = self._step(batch, 'train')
 
         loss = (self.hparams.hparams['lambda'] * node_embedder_loss) + ((1 - self.hparams.hparams['lambda']) *  patient_loss)
@@ -190,7 +197,7 @@ class CombinedGPAligner(pl.LightningModule):
         candidate_gene_embeddings_flattened = candidate_gene_embeddings.view(batch_sz*n_candidates, embed_dim)
         one_hot_labels_flattened = batch.one_hot_labels.view(batch_sz*n_candidates)
 
-        return {'loss': loss, 
+        output = {'loss': loss, 
                 'train/train_correct_gene_ranks': correct_gene_ranks, 
                 "train/node.train_roc": roc_score, 
                 "train/node.train_ap": ap_score, 
@@ -201,6 +208,8 @@ class CombinedGPAligner(pl.LightningModule):
                 'train/phen_gene_sims': phen_gene_sims.detach().cpu(),
                 'train/phenotype_names_degrees': batch.phenotype_names,
                 }
+        self.training_step_outputs.append(output)
+        return output
 
     def validation_step(self, batch, batch_idx):
         node_embedder_loss, patient_loss, correct_gene_ranks, roc_score, ap_score, acc, f1, node_embeddings, gat_attn, phenotype_embedding, candidate_gene_embeddings, attn_weights, phen_gene_sims, raw_phen_gene_sims, gene_mask, phenotype_mask = self._step(batch, 'val')
@@ -209,7 +218,7 @@ class CombinedGPAligner(pl.LightningModule):
         self.log('val_loss/patient.val_patient_loss', patient_loss, prog_bar=True)
         self.log('val_loss/patient.val_node_embedder_loss', node_embedder_loss, prog_bar=True)
 
-        return {'loss/val_loss': loss, 
+        output =  {'loss/val_loss': loss, 
                 'val/val_correct_gene_ranks': correct_gene_ranks, 
                 "val/node.val_roc": roc_score, 
                 "val/node.val_ap": ap_score, 
@@ -220,6 +229,8 @@ class CombinedGPAligner(pl.LightningModule):
                 'val/phen_gene_sims': phen_gene_sims.detach().cpu(),
                 'val/phenotype_names_degrees': batch.phenotype_names,
                 }
+        self.validation_step_outputs.append(output)
+        return output
     
     def write_results_to_file(self, batch_info, phen_gene_sims, gene_mask, phenotype_mask, attn_weights, correct_gene_ranks, gat_attn, node_embeddings, phenotype_embeddings, save=True, loop_type='predict'):
         # NOTE: only saves a single batch - to run at inference time, make sure batch size includes all patients
@@ -268,7 +279,7 @@ class CombinedGPAligner(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         node_embedder_loss, patient_loss, correct_gene_ranks, roc_score, ap_score, acc, f1, node_embeddings, gat_attn, phenotype_embedding, candidate_gene_embeddings, attn_weights, phen_gene_sims, raw_phen_gene_sims, gene_mask, phenotype_mask = self._step(batch, 'test')
         
-        return {'test/test_correct_gene_ranks': correct_gene_ranks, 
+        output = {'test/test_correct_gene_ranks': correct_gene_ranks, 
                 'test/node.embed': node_embeddings.detach().cpu(), 
                 'test/patient.phenotype_embed': phenotype_embedding.detach().cpu(),
                 'test/one_hot_labels': batch.one_hot_labels.detach().cpu(), #one_hot_labels_flattened.detach().cpu(),
@@ -283,6 +294,9 @@ class CombinedGPAligner(pl.LightningModule):
                 'test/gat_attn': gat_attn, # type = list
                 "test/n_id": batch.n_id[:batch.batch_size].detach().cpu(),
                 }
+
+        self.test_step_outputs.append(output)
+        return output
 
 
     def inference(self, batch, batch_idx):
@@ -300,7 +314,8 @@ class CombinedGPAligner(pl.LightningModule):
         batch_sz, max_n_cand_genes = batch.batch_cand_gene_nid.shape
         cand_gene_embeddings = torch.index_select(pad_outputs, 0, batch.batch_cand_gene_nid.view(-1)).view(batch_sz, max_n_cand_genes, -1)
 
-        if self.hparams.hparams['augment_genes']:            
+        # if self.hparams.hparams['augment_genes']:
+        if self.hparams.hparams.get('augment_genes', False):                
             print("Augmenting genes at inference...", self.hparams.hparams['aug_gene_w'])
             _, max_n_sim_cand_genes, k_sim_genes = batch.batch_sim_gene_nid.shape
             sim_gene_embeddings = torch.index_select(pad_outputs, 0, batch.batch_sim_gene_nid.view(-1)).view(batch_sz, max_n_sim_cand_genes, self.hparams.hparams['n_sim_genes'], -1)
@@ -335,8 +350,18 @@ class CombinedGPAligner(pl.LightningModule):
         use_candidate_list = True
         disease_nid = batch.batch_disease_nid if self.hparams.hparams['use_diseases'] else None
 
+        # Check if batch_cand_gene_to_phenotypes_spl exists... CHANGE: premtc
+        if hasattr(batch, 'batch_cand_gene_to_phenotypes_spl'):
+            batch_cand_gene_to_phenotypes_spl = batch.batch_cand_gene_to_phenotypes_spl
+        else:
+            batch_cand_gene_to_phenotypes_spl = None  #
+            print('==== ==== ==== ==== ==== No SPL information found in batch ==== ==== ==== ==== ==== ')
+
         # calculate similarity between phen & genes for all genes in manual candidate list
-        phen_gene_sims, raw_phen_gene_sims, phen_gene_mask, phen_gene_one_hot_labels = self.patient_model._calc_similarity(phenotype_embedding, candidate_gene_embeddings, None, batch.batch_cand_gene_nid, batch.batch_corr_gene_nid, disease_nid, batch.one_hot_labels, gene_mask, phenotype_mask, disease_mask, True, batch.batch_cand_gene_to_phenotypes_spl, alpha) 
+        # phen_gene_sims, raw_phen_gene_sims, phen_gene_mask, phen_gene_one_hot_labels = self.patient_model._calc_similarity(phenotype_embedding, candidate_gene_embeddings, None, batch.batch_cand_gene_nid, batch.batch_corr_gene_nid, disease_nid, batch.one_hot_labels, gene_mask, phenotype_mask, disease_mask, True, batch.batch_cand_gene_to_phenotypes_spl, alpha) 
+        
+        # Calculate similarity between phenotypes and genes
+        phen_gene_sims, raw_phen_gene_sims, phen_gene_mask, phen_gene_one_hot_labels = self.patient_model._calc_similarity(phenotype_embedding, candidate_gene_embeddings, None, batch.batch_cand_gene_nid, batch.batch_corr_gene_nid, disease_nid, batch.one_hot_labels, gene_mask, phenotype_mask, disease_mask, True, batch_cand_gene_to_phenotypes_spl, alpha)
 
         # Rank genes
         correct_gene_ranks, phen_gene_sims = self.patient_model._rank_genes(phen_gene_sims, phen_gene_mask, phen_gene_one_hot_labels)
@@ -345,8 +370,16 @@ class CombinedGPAligner(pl.LightningModule):
         return results_df, phen_df, *attn_dfs, phenotype_embeddings, disease_embeddings
 
     def _epoch_end(self, outputs, loop_type):
+        
 
-        correct_gene_ranks = torch.cat([x[f'{loop_type}/{loop_type}_correct_gene_ranks'] for x in outputs], dim=0)
+        # THIS IS ADDED/CHANGED - premtc: THIS WAS AN ERROR, DONT UNDERSTAND IT
+        # correct_gene_ranks = torch.cat([x[f'{loop_type}/{loop_type}_correct_gene_ranks'] for x in outputs], dim=0)
+        if outputs:
+            correct_gene_ranks = torch.cat([x[f'{loop_type}/{loop_type}_correct_gene_ranks'] for x in outputs if f'{loop_type}/{loop_type}_correct_gene_ranks' in x], dim=0)
+            print(' =========== /////// /////// PASSED LOOP TYPE ========== /////// ///////  ========== ')
+        else:
+            correct_gene_ranks = torch.tensor([])  # or handle it appropriately based on your logic
+            print(' =========== /////// /////// NOT PASSED LOOP TYPE ========== /////// ///////  ========== ')
 
         if loop_type == "test":
             
@@ -509,34 +542,37 @@ class CombinedGPAligner(pl.LightningModule):
         if loop_type == 'val':
             self.log(f'curr_epoch', self.current_epoch, prog_bar=False)
 
-    def training_epoch_end(self, outputs):
-
+    def on_train_epoch_end(self): # THIS IS CHANGED: premtc -> the hook is changed to on_train_epoch_end and outputs is removed
         if self.hparams.hparams['plot_intrain']:
-            all_train_nodes, counts = torch.unique(torch.cat([x['train/n_id'] for x in outputs], dim=0), return_counts=True)
+            all_train_nodes, counts = torch.unique(torch.cat([x['train/n_id'] for x in self.training_step_outputs], dim=0), return_counts=True)
             curr_all_train_nodes = {n.item(): c.item() if n not in self.all_train_nodes else c.item() + self.all_train_nodes[n].item() for n, c in zip(all_train_nodes, counts)}
             self.all_train_nodes.update(curr_all_train_nodes)
 
-            train_sparse_nodes, counts = torch.unique(torch.cat([x['train/sparse_idx'] for x in outputs], dim=0), return_counts=True)
+            train_sparse_nodes, counts = torch.unique(torch.cat([x['train/sparse_idx'] for x in self.training_step_outputs], dim=0), return_counts=True)
             curr_train_sparse_nodes = {n.item(): c.item() if n not in self.train_sparse_nodes else c.item() + self.train_sparse_nodes[n].item() for n, c in zip(train_sparse_nodes, counts)}
             self.train_sparse_nodes.update(curr_train_sparse_nodes)
 
-            train_target_batch, counts = torch.unique(torch.cat([x['train/target_batch'] for x in outputs], dim=0), return_counts=True)
+            train_target_batch, counts = torch.unique(torch.cat([x['train/target_batch'] for x in self.training_step_outputs], dim=0), return_counts=True)
             curr_train_target_batch = {n.item(): c.item() if n not in self.train_target_batch else c.item() + self.train_target_batch[n].item() for n, c in zip(train_target_batch, counts)}
             self.train_target_batch.update(curr_train_target_batch)
             
-            train_patient_nodes, counts = torch.unique(torch.cat([x['train/cand_gene_nid_orig'] for x in outputs], dim=0), return_counts=True)
+            train_patient_nodes, counts = torch.unique(torch.cat([x['train/cand_gene_nid_orig'] for x in self.training_step_outputs], dim=0), return_counts=True)
             self.train_patient_nodes = {n.item(): c.item() for n, c in zip(train_patient_nodes, counts)}
             
-            train_corr_gene_nids, counts = torch.unique(torch.cat([x['train/corr_gene_nid_orig'] for x in outputs], dim=0), return_counts=True)
+            train_corr_gene_nids, counts = torch.unique(torch.cat([x['train/corr_gene_nid_orig'] for x in self.training_step_outputs], dim=0), return_counts=True)
             self.train_corr_gene_nid = {g.item(): c.item() for g, c in zip(train_corr_gene_nids, counts)}
 
-        self._epoch_end(outputs, 'train')
+        self._epoch_end(self.training_step_outputs, 'train')
+        self.training_step_outputs.clear()
 
-    def validation_epoch_end(self, outputs):
-        self._epoch_end(outputs, 'val')
 
-    def test_epoch_end(self, outputs):
-        self._epoch_end(outputs, 'test')
+    def on_validation_epoch_end(self): # THIS IS CHANGED: premtc -> the hook is changed to on_validation_epoch_end and outputs is removed
+        self._epoch_end(self.validation_step_outputs, 'val')
+        self.validation_step_outputs.clear()
+
+    def on_test_epoch(self):
+        self._epoch_end(self.test_epoch_end, 'test')
+        self.test_step_outputs.clear()
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.hparams['lr'])
