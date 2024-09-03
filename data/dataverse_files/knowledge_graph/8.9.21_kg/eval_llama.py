@@ -197,7 +197,7 @@ def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to
     
     return results, accuracy
 
-# Main Execution
+# Main Execution 1
 
 if __name__ == "__main__":
     # Load necessary data
