@@ -209,7 +209,7 @@ if __name__ == "__main__":
     kg_node_map = load_csv_file('./KG_node_map_test.csv')
     kg_edgelist = load_csv_file('./KG_edgelist_mask_test.csv') #
 
-    # Process patient file
+    # Process patient file 1
     filepath = '../../patients/simulated_patients/disease_split_val_short_test.txt'
     results, accuracy = process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, api_key, num_patients=10)
 
