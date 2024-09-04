@@ -4,6 +4,7 @@ import pickle
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
+import os
 
 # Utility Functions
 
@@ -146,7 +147,6 @@ def predict_gene(prompt, model, tokenizer):
     # Extract the gene name from the response
     predicted_gene = response.split('\n')[-1].strip()
     
-    print(f"Predicted gene: {predicted_gene}")
     return predicted_gene
 
 # Main Processing Function
@@ -170,10 +170,9 @@ def process_single_patient(patient_data, hpo_to_name_dict, hpo_to_idx_dict, ense
         "true_gene": true_gene_name,
         "is_correct": is_correct
     }
-    print(f"Processing result: {json.dumps(result, indent=2)}")
     return result
 
-def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=None, batch_size=1):
+def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=None, batch_size=16):
     """Processes a file of patient data in batches and evaluates gene predictions."""
     patient_data_df = load_patient_data(filepath)
     
@@ -187,41 +186,72 @@ def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to
         batch_end = min(batch_start + batch_size, len(patient_data_df))
         batch = patient_data_df.iloc[batch_start:batch_end]
         
-        for _, row in tqdm(batch.iterrows(), total=len(batch), desc="Processing patients"):
+        batch_results = []
+        for _, row in tqdm(batch.iterrows(), total=len(batch), desc=f"Processing batch {batch_start//batch_size + 1}"):
             patient_data = json.loads(row['patient_data'])
             result = process_single_patient(patient_data, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer)
-            results.append(result)
+            batch_results.append(result)
         
-        # Clear CUDA memory after each batch to prevent memory overflow
+        results.extend(batch_results)
+        
+        # Free memory
         torch.cuda.empty_cache()
+        
+        # Print batch results
+        batch_correct = sum(result['is_correct'] for result in batch_results)
+        batch_accuracy = batch_correct / len(batch_results)
+        print(f"\nBatch {batch_start//batch_size + 1} results:")
+        print(f"Processed {len(batch_results)} patients")
+        print(f"Correct predictions: {batch_correct}")
+        print(f"Batch accuracy: {batch_accuracy:.2%}")
     
     correct_predictions = sum(result['is_correct'] for result in results)
     total_predictions = len(results)
     accuracy = correct_predictions / total_predictions
     
-    print(f"\nProcessed {total_predictions} patients")
-    print(f"Correct predictions: {correct_predictions}")
-    print(f"Accuracy: {accuracy:.2%}")
+    print(f"\nOverall results:")
+    print(f"Total processed patients: {total_predictions}")
+    print(f"Total correct predictions: {correct_predictions}")
+    print(f"Overall accuracy: {accuracy:.2%}")
     
     return results, accuracy
 
-
 if __name__ == "__main__":
+    # Set up logging
+    import logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
     # Load necessary data
+    logger.info("Loading necessary data...")
     hpo_to_name_dict = load_pickle_file('hpo_to_name_dict_8.9.21_kg.pkl')
     hpo_to_idx_dict = load_pickle_file('hpo_to_idx_dict_8.9.21_kg.pkl')
     ensembl_to_idx_dict = load_pickle_file('ensembl_to_idx_dict_8.9.21_kg.pkl')
     kg_node_map = load_csv_file('./KG_node_map_test.csv')
     kg_edgelist = load_csv_file('./KG_edgelist_mask_test.csv')
 
+    logger.info("Loading model and tokenizer...")
     model_name = "mistralai/Mistral-7B-Instruct-v0.2"
+    access_token = "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"
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=access_token)
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map="auto", token=access_token, use_cache=False)
     model.gradient_checkpointing_enable()
 
     # Process patient file with batch processing
     filepath = '../../patients/simulated_patients/disease_split_val_short_test.txt'
-    results, accuracy = process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=224, batch_size=1)
+    num_patients = 224
+    batch_size = 16  
 
-    print(f"\nFinal Accuracy: {accuracy:.2%}")
-    print("Gene prediction process completed")
+    logger.info(f"Starting evaluation on {num_patients} patients with batch size {batch_size}")
+    results, accuracy = process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=num_patients, batch_size=batch_size)
+
+    logger.info(f"Final Accuracy: {accuracy:.2%}")
+    logger.info("Gene prediction process completed")
+
+    # Save results to a file
+    output_dir = "evaluation_results"
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, "evaluation_results.json")
+    with open(output_file, "w") as f:
+        json.dump({"results": results, "accuracy": accuracy}, f, indent=2)
+    logger.info(f"Results saved to {output_file}")
