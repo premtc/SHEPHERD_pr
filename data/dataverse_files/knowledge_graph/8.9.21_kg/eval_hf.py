@@ -5,8 +5,8 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import os
+import gc
 
-# Utility Functions
 
 def load_patient_data(filepath):
     """Loads patient data from a text file."""
@@ -109,7 +109,6 @@ def map_gene_connections_to_phenotypes(phenotype_mapping, kg_edgelist, kg_node_m
     return phenotype_mapping
 
 # LLM Interaction Functions
-
 def create_prompt(phenotype_mapping, candidate_genes):
     """Creates a prompt for the LLM based on phenotype and gene data."""
     prompt = "Patient Data:\n"
@@ -143,36 +142,63 @@ def predict_gene(prompt, model, tokenizer):
     # Free memory
     del inputs, outputs
     torch.cuda.empty_cache()
+    gc.collect()
     
     # Extract the gene name from the response
     predicted_gene = response.split('\n')[-1].strip()
     
     return predicted_gene
 
-# Main Processing Function
-
 def process_single_patient(patient_data, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer):
     """Processes a single patient's data and predicts the true gene."""
-    phenotype_mapping = map_phenotypes_to_kg(patient_data["positive_phenotypes"], hpo_to_name_dict, hpo_to_idx_dict, kg_node_map)
-    all_candidate_genes_mapping = map_genes_to_kg(patient_data["all_candidate_genes"], ensembl_to_idx_dict, kg_node_map)
-    phenotype_mapping = map_gene_connections_to_phenotypes(phenotype_mapping, kg_edgelist, kg_node_map, ensembl_to_idx_dict)
+    try:
+        # Check if the number of positive phenotypes is too high
+        if len(patient_data["positive_phenotypes"]) > MAX_SAMPLE_LENGTH:
+            return {
+                "predicted_gene": "NONE",
+                "true_gene": "SKIPPED",
+                "is_correct": False,
+                "reason": "Too many phenotypes"
+            }
+
+        phenotype_mapping = map_phenotypes_to_kg(patient_data["positive_phenotypes"], hpo_to_name_dict, hpo_to_idx_dict, kg_node_map)
+        all_candidate_genes_mapping = map_genes_to_kg(patient_data["all_candidate_genes"], ensembl_to_idx_dict, kg_node_map)
+        phenotype_mapping = map_gene_connections_to_phenotypes(phenotype_mapping, kg_edgelist, kg_node_map, ensembl_to_idx_dict)
+        
+        prompt = create_prompt(phenotype_mapping, all_candidate_genes_mapping)
+        predicted_gene = predict_gene(prompt, model, tokenizer)
+        
+        true_gene = patient_data["true_genes"][0]
+        true_gene_name = map_genes_to_kg([true_gene], ensembl_to_idx_dict, kg_node_map)[true_gene]['node_name']
+        is_correct = true_gene_name.lower() in predicted_gene.lower()
+        
+        result = {
+            "predicted_gene": predicted_gene,
+            "true_gene": true_gene_name,
+            "is_correct": is_correct,
+            "reason": "Processed successfully"
+        }
+    except torch.cuda.OutOfMemoryError:
+        # Handle CUDA out of memory error
+        torch.cuda.empty_cache()  # Clear CUDA memory
+        result = {
+            "predicted_gene": "NONE",
+            "true_gene": "SKIPPED",
+            "is_correct": False,
+            "reason": "CUDA out of memory"
+        }
+    except Exception as e:
+        # Handle any other unexpected errors
+        result = {
+            "predicted_gene": "NONE",
+            "true_gene": "SKIPPED",
+            "is_correct": False,
+            "reason": f"Error: {str(e)}"
+        }
     
-    prompt = create_prompt(phenotype_mapping, all_candidate_genes_mapping)
-    predicted_gene = predict_gene(prompt, model, tokenizer)
-    torch.cuda.empty_cache()  # Clear CUDA cache after prediction
-    
-    true_gene = patient_data["true_genes"][0]
-    true_gene_name = map_genes_to_kg([true_gene], ensembl_to_idx_dict, kg_node_map)[true_gene]['node_name']
-    is_correct = true_gene_name.lower() in predicted_gene.lower()
-    
-    result = {
-        "predicted_gene": predicted_gene,
-        "true_gene": true_gene_name,
-        "is_correct": is_correct
-    }
     return result
 
-def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=None, batch_size=16):
+def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=None, batch_size=4):
     """Processes a file of patient data in batches and evaluates gene predictions."""
     patient_data_df = load_patient_data(filepath)
     
@@ -180,6 +206,9 @@ def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to
         patient_data_df = patient_data_df.head(num_patients)
     
     results = []
+    total_skipped_samples = 0
+    total_cuda_oom_samples = 0
+    total_other_error_samples = 0
     
     # Processing patients in batches
     for batch_start in range(0, len(patient_data_df), batch_size):
@@ -187,71 +216,136 @@ def process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to
         batch = patient_data_df.iloc[batch_start:batch_end]
         
         batch_results = []
+        batch_skipped_samples = 0
+        batch_cuda_oom_samples = 0
+        batch_other_error_samples = 0
+        
         for _, row in tqdm(batch.iterrows(), total=len(batch), desc=f"Processing batch {batch_start//batch_size + 1}"):
             patient_data = json.loads(row['patient_data'])
             result = process_single_patient(patient_data, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer)
-            batch_results.append(result)
+            if result["true_gene"] == "SKIPPED":
+                if result["reason"] == "CUDA out of memory":
+                    batch_cuda_oom_samples += 1
+                elif result["reason"] == "Too many phenotypes":
+                    batch_skipped_samples += 1
+                else:
+                    batch_other_error_samples += 1
+            else:
+                batch_results.append(result)
+                print("\n \n")
+                print(f"Predicted: {result['predicted_gene']}, Ground Truth: {result['true_gene']}, Correct: {result['is_correct']}")
         
         results.extend(batch_results)
         
-        # Free memory
+        # Update total counts
+        total_skipped_samples += batch_skipped_samples
+        total_cuda_oom_samples += batch_cuda_oom_samples
+        total_other_error_samples += batch_other_error_samples
+        
+        # Clear CUDA memory after each batch to prevent memory overflow
         torch.cuda.empty_cache()
+        gc.collect()
         
         # Print batch results
         batch_correct = sum(result['is_correct'] for result in batch_results)
-        batch_accuracy = batch_correct / len(batch_results)
+        batch_accuracy = batch_correct / len(batch_results) if batch_results else 0
         print(f"\nBatch {batch_start//batch_size + 1} results:")
         print(f"Processed {len(batch_results)} patients")
         print(f"Correct predictions: {batch_correct}")
         print(f"Batch accuracy: {batch_accuracy:.2%}")
+        print(f"Batch skipped samples: {batch_skipped_samples}")
+        print(f"Batch CUDA OOM samples: {batch_cuda_oom_samples}")
+        print(f"Batch other error samples: {batch_other_error_samples}")
+        print(f"Total skipped samples so far: {total_skipped_samples}")
+        print(f"Total CUDA OOM samples so far: {total_cuda_oom_samples}")
+        print(f"Total other error samples so far: {total_other_error_samples}")
     
     correct_predictions = sum(result['is_correct'] for result in results)
     total_predictions = len(results)
-    accuracy = correct_predictions / total_predictions
+    accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0
     
     print(f"\nOverall results:")
     print(f"Total processed patients: {total_predictions}")
     print(f"Total correct predictions: {correct_predictions}")
     print(f"Overall accuracy: {accuracy:.2%}")
+    print(f"Total skipped samples: {total_skipped_samples}")
+    print(f"Total CUDA OOM samples: {total_cuda_oom_samples}")
+    print(f"Total other error samples: {total_other_error_samples}")
     
-    return results, accuracy
+    return results, accuracy, total_skipped_samples, total_cuda_oom_samples, total_other_error_samples
 
 if __name__ == "__main__":
-    # Set up logging
     import logging
+    from transformers import BitsAndBytesConfig
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
 
-    # Load necessary data
     logger.info("Loading necessary data...")
     hpo_to_name_dict = load_pickle_file('hpo_to_name_dict_8.9.21_kg.pkl')
     hpo_to_idx_dict = load_pickle_file('hpo_to_idx_dict_8.9.21_kg.pkl')
     ensembl_to_idx_dict = load_pickle_file('ensembl_to_idx_dict_8.9.21_kg.pkl')
     kg_node_map = load_csv_file('./KG_node_map_test.csv')
     kg_edgelist = load_csv_file('./KG_edgelist_mask_test.csv')
+    MAX_SAMPLE_LENGTH = 720
 
     logger.info("Loading model and tokenizer...")
     model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-    access_token = "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"
+    
+    
+    # Configure quantization
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16
+    )
+    
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=access_token)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map="auto", token=access_token, use_cache=False)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=quantization_config,
+        device_map="auto",
+        token=access_token,
+        use_cache=False
+    )
     model.gradient_checkpointing_enable()
 
-    # Process patient file with batch processing
     filepath = '../../patients/simulated_patients/disease_split_val_short_test.txt'
-    num_patients = 224
-    batch_size = 16  
+    num_patients = 224  # Adjust this as needed
+    batch_size = 1  # Reduced batch size
+
+    # logger.info(f"Starting evaluation on {num_patients} patients with batch size {batch_size}")
+    # results, accuracy = process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=num_patients, batch_size=batch_size)
+
+    # logger.info(f"Final Accuracy: {accuracy:.2%}")
+    # logger.info("Gene prediction process completed")
+
+    # output_dir = "evaluation_results"
+    # os.makedirs(output_dir, exist_ok=True)
+    # output_file = os.path.join(output_dir, "evaluation_results.json")
+    # with open(output_file, "w") as f:
+    #     json.dump({"results": results, "accuracy": accuracy}, f, indent=2)
+    # logger.info(f"Results saved to {output_file}")#
 
     logger.info(f"Starting evaluation on {num_patients} patients with batch size {batch_size}")
-    results, accuracy = process_patient_file(filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, model, tokenizer, num_patients=num_patients, batch_size=batch_size)
+    results, accuracy, skipped_samples, cuda_oom_samples, other_error_samples = process_patient_file(
+        filepath, hpo_to_name_dict, hpo_to_idx_dict, ensembl_to_idx_dict, kg_node_map, kg_edgelist, 
+        model, tokenizer, num_patients=num_patients, batch_size=batch_size
+    )
 
     logger.info(f"Final Accuracy: {accuracy:.2%}")
+    logger.info(f"Total skipped samples: {skipped_samples}")
+    logger.info(f"Total CUDA OOM samples: {cuda_oom_samples}")
+    logger.info(f"Total other error samples: {other_error_samples}")
     logger.info("Gene prediction process completed")
 
-    # Save results to a file
     output_dir = "evaluation_results"
     os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, "evaluation_results.json")
     with open(output_file, "w") as f:
-        json.dump({"results": results, "accuracy": accuracy}, f, indent=2)
+        json.dump({
+            "results": results,
+            "accuracy": accuracy,
+            "skipped_samples": skipped_samples,
+            "cuda_oom_samples": cuda_oom_samples,
+            "other_error_samples": other_error_samples
+        }, f, indent=2)
     logger.info(f"Results saved to {output_file}")
