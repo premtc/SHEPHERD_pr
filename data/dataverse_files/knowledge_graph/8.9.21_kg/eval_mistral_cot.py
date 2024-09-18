@@ -405,7 +405,7 @@ if __name__ == "__main__":
     logger.info("Loading model and tokenizer...")
     model_name = "meta-llama/Llama-2-7b-chat-hf"  # Use an instruction-following model
 
-    access_token = "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"  # Replace with your actual token
+    
 
     # Configure quantization (optional)
     quantization_config = BitsAndBytesConfig(
