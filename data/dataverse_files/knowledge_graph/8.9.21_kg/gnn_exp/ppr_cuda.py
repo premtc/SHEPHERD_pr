@@ -94,36 +94,51 @@ def map_gene_to_index(gene_name, node_name_to_idx):
     return idx
 
 # Adjusted function to compute personalized PageRank using power iteration
-def compute_ppr_gpu(data, personalization_nodes, alpha=0.15, max_iter=50, tol=1e-6):
-    print(f"Computing personalized PageRank for nodes: {personalization_nodes} with alpha={alpha} using GPU...")
+def compute_ppr_gpu(data, personalization_nodes, alpha=0.85, max_iter=100, tol=1e-6):
+    print(f"Computing personalized PageRank for nodes: {personalization_nodes} with damping factor alpha={alpha} using GPU...")
     num_nodes = data.num_nodes
     edge_index = data.edge_index
 
-    # Initialize teleportation vector and PageRank scores
+    # Initialize personalization vector
     personalization = torch.zeros(num_nodes, device='cuda')
     personalization[personalization_nodes] = 1.0 / len(personalization_nodes)
+
+    # Initialize ppr_scores
     ppr_scores = torch.ones(num_nodes, device='cuda') / num_nodes
 
-    # Build the adjacency matrix with reversed edges for PageRank
+    # Build the adjacency matrix without reversing edges
     row, col = edge_index
-    adj_matrix = torch.sparse_coo_tensor(torch.stack([col, row]), torch.ones(row.size(0), device='cuda'), (num_nodes, num_nodes))
+    adj_matrix = torch.sparse_coo_tensor(
+        torch.stack([row, col]),  # Do not reverse edges
+        torch.ones(row.size(0), device='cuda'),
+        (num_nodes, num_nodes)
+    ).coalesce()
 
-    # Compute in-degree for normalization
-    deg = torch.sparse.sum(adj_matrix, dim=1).to_dense()
-    deg_inv = torch.pow(deg, -1)
+    # Compute out-degree for normalization
+    deg = torch.sparse.sum(adj_matrix, dim=1).to_dense()  # Sum over columns for each row
+    deg_inv = deg.pow(-1)
     deg_inv[deg_inv == float('inf')] = 0
 
     # Normalize adjacency matrix
     adj_normalized = torch.sparse_coo_tensor(
-        adj_matrix._indices(),
-        deg_inv[adj_matrix._indices()[0]] * adj_matrix._values(),
+        adj_matrix.indices(),
+        deg_inv[adj_matrix.indices()[0]] * adj_matrix.values(),
         adj_matrix.size()
     ).coalesce()
+
+    # Identify dangling nodes (nodes with zero out-degree)
+    dangling_nodes = deg == 0
+
+    # Handle dangling nodes
+    dangling_weights = personalization  # Same as NetworkX default
 
     # Power iteration
     for i in range(max_iter):
         prev_ppr = ppr_scores.clone()
-        ppr_scores = (1 - alpha) * torch.sparse.mm(adj_normalized, ppr_scores.unsqueeze(1)).squeeze() + alpha * personalization
+        dangling_sum = ppr_scores[dangling_nodes].sum()
+        ppr_scores = alpha * (torch.sparse.mm(adj_normalized, ppr_scores.unsqueeze(1)).squeeze() + dangling_sum * dangling_weights) + (1 - alpha) * personalization
+        # Normalize ppr_scores to sum to 1
+        ppr_scores = ppr_scores / ppr_scores.sum()
         if torch.norm(ppr_scores - prev_ppr, p=1) < tol:
             print(f"Converged after {i+1} iterations.")
             break
@@ -234,8 +249,8 @@ def main(max_samples=None):
         if result:
             results.append(result)
             # Save individual patient result
-            os.makedirs('./patient_subgraph_data/cuda', exist_ok=True)
-            with open(f'./patient_subgraph_data/cuda/patient_{patient_data["id"]}_result_torch.json', 'w') as f:
+            os.makedirs('./patient_subgraph_data/cuda1', exist_ok=True)
+            with open(f'./patient_subgraph_data/cuda1/patient_{patient_data["id"]}_result_torch.json', 'w') as f:
                 json.dump(result, f, indent=4)
             print(f"Saved result for patient {patient_data['id']} to patient_{patient_data['id']}_result_torch.json")
         else:
