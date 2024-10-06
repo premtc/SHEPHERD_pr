@@ -124,17 +124,31 @@ def compute_ppr_gpu(data, personalization_nodes, alpha=0.15, max_iter=50, tol=1e
     return ppr_scores
 
 # Function to extract subgraph based on PPR scores
+from torch_geometric.utils import subgraph
+
 def extract_subgraph(ppr_scores, data, top_k):
     print(f"Extracting subgraph with top {top_k} PPR scores...")
+    # Select the top_k nodes based on PPR scores
     top_nodes = torch.topk(ppr_scores, top_k).indices.flatten()
-    subgraph = utils.k_hop_subgraph(top_nodes, num_hops=1, edge_index=data.edge_index, relabel_nodes=True, num_nodes=data.num_nodes)
-    return subgraph
+
+    # Extract subgraph with only top_k nodes and their connections
+    subgraph_edge_index, edge_mask = subgraph(top_nodes, data.edge_index, relabel_nodes=True, num_nodes=data.num_nodes)
+    
+    # Only retain edges that are between the top_k nodes
+    subgraph_data = Data(
+        x=data.x[top_nodes],
+        edge_index=subgraph_edge_index,
+        edge_attr=data.edge_attr[edge_mask]
+    )
+
+    return subgraph_data
 
 # Function to extract triplets from subgraph
-def extract_triplets_from_subgraph(subgraph, relation_dict):
+def extract_triplets_from_subgraph(subgraph):
     print("Extracting triplets from subgraph...")
     triplets = []
-    edge_index, edge_attr = subgraph[1], subgraph[3]
+    edge_index, edge_attr = subgraph.edge_index, subgraph.edge_attr
+
     if edge_attr is not None and edge_index.size(1) == edge_attr.size(0):
         for i in range(edge_index.shape[1]):
             source, target = edge_index[:, i]
@@ -142,6 +156,7 @@ def extract_triplets_from_subgraph(subgraph, relation_dict):
             triplets.append((source.item(), relation_numeric, target.item()))
     else:
         print("Mismatch in edge and attribute sizes. Skipping triplet extraction.")
+    
     print(f"Extracted triplets length: {len(triplets)}")
     return triplets
 
@@ -164,11 +179,11 @@ def process_patient(patient_data, data, node_name_to_idx, relation_dict, top_k_v
         subgraph = extract_subgraph(ppr_scores, data, top_k=top_k)
         
         # Check if true gene is in subgraph
-        if true_gene_idx in subgraph[0]:
+        if true_gene_idx in subgraph.x:
             print(f"True gene {true_gene_idx} found in subgraph with top_k={top_k}.")
             print("\n \n FOUND \n \n")
             # Extract triplets from subgraph
-            triplets = extract_triplets_from_subgraph(subgraph, relation_dict)
+            triplets = extract_triplets_from_subgraph(subgraph)
             patient_result = {
                 'patient_id': patient_data['id'],
                 'positive_phenotypes': {
@@ -181,8 +196,8 @@ def process_patient(patient_data, data, node_name_to_idx, relation_dict, top_k_v
                 },
                 'subgraph_info':{
                     'top_k': top_k,
-                    'num_nodes': subgraph[0].size(0),
-                    'num_edges': subgraph[1].size(1)                  
+                    'num_nodes': subgraph.x.size(0),
+                    'num_edges': subgraph.edge_index.size(1)                  
                 },                
                 'subgraph.triplets': {
                     'triplets': triplets                    
