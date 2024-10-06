@@ -8,7 +8,7 @@ import os
 import argparse
 from tqdm import tqdm
 from torch_geometric.data import Data
-from torch_geometric.transforms import ToUndirected
+from torch_geometric.utils import subgraph
 
 import random
 
@@ -46,7 +46,6 @@ except FileNotFoundError:
 
     # Create a graph using PyG's Data
     data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
-    data = ToUndirected()(data)
 
     # Save the knowledge graph for future use
     with open('knowledge_graph_to.pt', 'wb') as f:
@@ -94,7 +93,7 @@ def map_gene_to_index(gene_name, node_name_to_idx):
         print(f"Mapped gene '{gene_name}' to index: {idx}")
     return idx
 
-# Function to compute personalized PageRank using power iteration
+# Adjusted function to compute personalized PageRank using power iteration
 def compute_ppr_gpu(data, personalization_nodes, alpha=0.15, max_iter=50, tol=1e-6):
     print(f"Computing personalized PageRank for nodes: {personalization_nodes} with alpha={alpha} using GPU...")
     num_nodes = data.num_nodes
@@ -105,43 +104,52 @@ def compute_ppr_gpu(data, personalization_nodes, alpha=0.15, max_iter=50, tol=1e
     personalization[personalization_nodes] = 1.0 / len(personalization_nodes)
     ppr_scores = torch.ones(num_nodes, device='cuda') / num_nodes
 
-    # Sparse adjacency matrix
+    # Build the adjacency matrix with reversed edges for PageRank
     row, col = edge_index
-    adj_matrix = torch.sparse_coo_tensor(torch.stack([row, col]), torch.ones(row.size(0), device='cuda'), (num_nodes, num_nodes))
+    adj_matrix = torch.sparse_coo_tensor(torch.stack([col, row]), torch.ones(row.size(0), device='cuda'), (num_nodes, num_nodes))
+
+    # Compute in-degree for normalization
     deg = torch.sparse.sum(adj_matrix, dim=1).to_dense()
     deg_inv = torch.pow(deg, -1)
     deg_inv[deg_inv == float('inf')] = 0
 
-    # Power iteration without explicitly creating large dense matrices
+    # Normalize adjacency matrix
+    adj_normalized = torch.sparse_coo_tensor(
+        adj_matrix._indices(),
+        deg_inv[adj_matrix._indices()[0]] * adj_matrix._values(),
+        adj_matrix.size()
+    ).coalesce()
+
+    # Power iteration
     for i in range(max_iter):
         prev_ppr = ppr_scores.clone()
-        adj_normalized = torch.sparse_coo_tensor(adj_matrix._indices(), deg_inv[adj_matrix._indices()[0]] * adj_matrix._values(), adj_matrix.size()).to('cuda')
         ppr_scores = (1 - alpha) * torch.sparse.mm(adj_normalized, ppr_scores.unsqueeze(1)).squeeze() + alpha * personalization
-        torch.cuda.empty_cache()  # Free up memory
         if torch.norm(ppr_scores - prev_ppr, p=1) < tol:
+            print(f"Converged after {i+1} iterations.")
             break
 
     return ppr_scores
 
 # Function to extract subgraph based on PPR scores
-from torch_geometric.utils import subgraph
-
 def extract_subgraph(ppr_scores, data, top_k):
     print(f"Extracting subgraph with top {top_k} PPR scores...")
     # Select the top_k nodes based on PPR scores
     top_nodes = torch.topk(ppr_scores, top_k).indices.flatten()
 
     # Extract subgraph with only top_k nodes and their connections
-    subgraph_edge_index, edge_mask = subgraph(top_nodes, data.edge_index, relabel_nodes=True, num_nodes=data.num_nodes)
-    
-    # Only retain edges that are between the top_k nodes
+    subgraph_edge_index, subgraph_edge_attr = subgraph(
+        top_nodes, data.edge_index, edge_attr=data.edge_attr, relabel_nodes=False, num_nodes=data.num_nodes)
+
+    print(f"Subgraph extracted: {len(top_nodes)} nodes, {subgraph_edge_index.size(1)} edges, {subgraph_edge_attr.size(0)} edge attributes.")
+
+    # Create subgraph data with original node indices
     subgraph_data = Data(
-        x=data.x[top_nodes],
         edge_index=subgraph_edge_index,
-        edge_attr=data.edge_attr[edge_mask]
+        edge_attr=subgraph_edge_attr,
+        num_nodes=data.num_nodes  # Important to set the number of nodes
     )
 
-    return subgraph_data
+    return subgraph_data, top_nodes
 
 # Function to extract triplets from subgraph
 def extract_triplets_from_subgraph(subgraph):
@@ -152,12 +160,14 @@ def extract_triplets_from_subgraph(subgraph):
     if edge_attr is not None and edge_index.size(1) == edge_attr.size(0):
         for i in range(edge_index.shape[1]):
             source, target = edge_index[:, i]
+            source_original = source.item()
+            target_original = target.item()
             relation_numeric = edge_attr[i].item()
-            triplets.append((source.item(), relation_numeric, target.item()))
+            triplets.append((source_original, relation_numeric, target_original))
     else:
-        print("Mismatch in edge and attribute sizes. Skipping triplet extraction.")
-    
-    print(f"Extracted triplets length: {len(triplets)}")
+        print(f"Mismatch in edge and attribute sizes or attributes missing. Edge count: {edge_index.size(1)}, Attribute count: {edge_attr.size(0) if edge_attr is not None else 'None'}. Skipping triplet extraction.")
+
+    print(f"Extracted {len(triplets)} triplets from subgraph.")
     return triplets
 
 # Function to process each patient
@@ -174,12 +184,12 @@ def process_patient(patient_data, data, node_name_to_idx, relation_dict, top_k_v
         print(f"Trying top_k={top_k}...")
         # Compute PPR scores using GPU
         ppr_scores = compute_ppr_gpu(data, phenotype_indices)
-        
+
         # Extract subgraph
-        subgraph = extract_subgraph(ppr_scores, data, top_k=top_k)
-        
+        subgraph, top_nodes = extract_subgraph(ppr_scores, data, top_k=top_k)
+
         # Check if true gene is in subgraph
-        if true_gene_idx in subgraph.x:
+        if true_gene_idx in top_nodes:
             print(f"True gene {true_gene_idx} found in subgraph with top_k={top_k}.")
             print("\n \n FOUND \n \n")
             # Extract triplets from subgraph
@@ -194,13 +204,13 @@ def process_patient(patient_data, data, node_name_to_idx, relation_dict, top_k_v
                     'name': patient_data['true_genes'][0],
                     'index': true_gene_idx
                 },
-                'subgraph_info':{
+                'subgraph_info': {
                     'top_k': top_k,
-                    'num_nodes': subgraph.x.size(0),
-                    'num_edges': subgraph.edge_index.size(1)                  
-                },                
+                    'num_nodes': len(top_nodes),
+                    'num_edges': subgraph.edge_index.size(1)
+                },
                 'subgraph.triplets': {
-                    'triplets': triplets                    
+                    'triplets': triplets
                 }
             }
             return patient_result
@@ -224,9 +234,10 @@ def main(max_samples=None):
         if result:
             results.append(result)
             # Save individual patient result
+            os.makedirs('./patient_subgraph_data/cuda', exist_ok=True)
             with open(f'./patient_subgraph_data/cuda/patient_{patient_data["id"]}_result_torch.json', 'w') as f:
                 json.dump(result, f, indent=4)
-            print(f"Saved result for patient {patient_data['id']} to patient_{patient_data['id']}_result.json")
+            print(f"Saved result for patient {patient_data['id']} to patient_{patient_data['id']}_result_torch.json")
         else:
             print(f"No result for patient with ID: {patient_data['id']}")
 
