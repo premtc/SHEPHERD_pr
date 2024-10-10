@@ -9,6 +9,7 @@ import json
 from sklearn.model_selection import train_test_split
 from typing import Dict, Any
 import logging
+from tqdm import tqdm
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,7 +35,7 @@ class GuidedGNN(torch.nn.Module):
         for conv in self.convs:
             x_dict = conv(x_dict, edge_index_dict)
             x_dict = {key: F.elu(x) for key, x in x_dict.items()}
-        return {key: self.lin[key](x) for key, x in x_dict.items()}
+        return {key: self.lin[key](x).squeeze(-1) for key, x in x_dict.items()}
 
 def load_patient_data(file_path: str) -> Dict[str, Any]:
     with open(file_path, 'r') as f:
@@ -52,14 +53,14 @@ def train_guided_gnn(data, patient_files, model, optimizer, criterion, top_k=250
         input_nodes=('gene/protein', None),
     )
 
+    pbar = tqdm(total=len(patient_files), desc="Training Progress")
+
     for batch in loader:
         batch = batch.to(device)
         optimizer.zero_grad()
         batch_loss = 0
 
-        for i, patient_file in enumerate(patient_files):
-            logger.info(f"Processing patient file {i+1}/{len(patient_files)}: {patient_file}")
-            
+        for patient_file in patient_files:
             patient = load_patient_data(patient_file)
             phenotype_indices = patient['positive_phenotypes']['indices']
             true_gene_index = patient['true_gene']['index']
@@ -80,12 +81,7 @@ def train_guided_gnn(data, patient_files, model, optimizer, criterion, top_k=250
             if true_gene_index in gene_global_to_batch:
                 batch_true_gene_index = gene_global_to_batch[true_gene_index]
 
-                logger.info(f"Scores shape: {scores.shape}, Top-k: {top_k}")
-                scores = scores.squeeze()  # Convert from [N, 1] to [N]
-                logger.info(f"Squeezed scores shape: {scores.shape}")
-                
                 actual_k = min(top_k, scores.numel())
-                logger.info(f"Using actual k: {actual_k}")
 
                 if actual_k > 0:
                     _, top_k_indices = torch.topk(scores, k=actual_k)
@@ -93,29 +89,24 @@ def train_guided_gnn(data, patient_files, model, optimizer, criterion, top_k=250
 
                     if batch_true_gene_index in relevant_nodes:
                         loss = torch.tensor(0.0, device=device)
-                        logger.info(f"True gene found in the top-{actual_k} nodes.")
                     else:
                         loss = criterion(scores, torch.zeros_like(scores))
-                        logger.warning(f"True gene not found in the top-{actual_k} nodes. Adding penalty.")
-                else:
-                    logger.warning("No scores available for ranking. Skipping loss calculation.")
-                    continue
 
-                batch_loss += loss
-                logger.info(f"Loss for patient file {i+1}/{len(patient_files)}: {loss.item()}")
-                total_processed += 1
-            else:
-                logger.warning(f"True gene index {true_gene_index} not found in the current batch. Skipping.")
-                continue
+                    batch_loss += loss
+                    total_processed += 1
+                    pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+                    pbar.update(1)
 
         if batch_loss > 0:
             batch_loss.backward()
             optimizer.step()
             total_loss += batch_loss.item()
+
+    pbar.close()
     
     if total_processed > 0:
         avg_loss = total_loss / total_processed
-        logger.info(f"Average training loss: {avg_loss}")
+        logger.info(f"Average training loss: {avg_loss:.4f}")
         return avg_loss
     else:
         logger.warning("No patient files were processed successfully.")
@@ -128,19 +119,11 @@ if __name__ == "__main__":
     data = torch.load('./TEST1.pt')
     logger.info("Graph loaded from 'TEST1.pt'.")
 
-    logger.info(f"Node types: {data.node_types}")
-    logger.info(f"Edge types: {data.edge_types}")
-    for node_type in data.node_types:
-        logger.info(f"Number of {node_type} nodes: {data[node_type].num_nodes}")
-        logger.info(f"Features for {node_type} nodes: {data[node_type].num_features}")
-    for edge_type in data.edge_types:
-        logger.info(f"Number of {edge_type} edges: {data[edge_type].num_edges}")
-
     data = data.to(device)
 
     patient_files = [
         f"./patient_subgraph_data/labeled_patient_data/patient_{i}_result.json" 
-        for i in range(4000) 
+        for i in range(200) 
         if os.path.exists(f"./patient_subgraph_data/labeled_patient_data/patient_{i}_result.json")
     ]
 
@@ -159,4 +142,4 @@ if __name__ == "__main__":
     criterion = torch.nn.BCEWithLogitsLoss()
 
     loss = train_guided_gnn(data, train_files, model, optimizer, criterion)
-    logger.info(f"Training loss: {loss}")
+    logger.info(f"Final training loss: {loss:.4f}")
